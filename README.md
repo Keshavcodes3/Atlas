@@ -2,8 +2,6 @@
 
 > One backend where a team connects docs / code / URLs, then queries and acts via permissioned agents. RAG + agents + evals, production-grade.
 
-Built by **Keshav (Keshavcodes3)**. Backend-first, GenAI-powered. Designed to run lean on **8GB RAM, Windows 11, Docker**.
-
 Atlas is a **mini-Notion + RAG + LangGraph agent runtime**. It absorbs two prior ideas as modules:
 - `Mira` → agent loop (plan → act → verify + approvals + audit)
 - `codebase-rag` → retrieval pipeline (ingest → chunk → embed → hybrid search + citations)
