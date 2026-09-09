@@ -1,759 +1,1705 @@
-# Atlas — Team Knowledge + Action Engine
+Atlas — Team Knowledge + Action Engine
 
-> One backend where a team connects docs / code / URLs, then queries and acts via permissioned agents. RAG + agents + evals, production-grade.
+A backend-heavy learning project for building RAG, agents, background jobs, RBAC, observability, and distributed-system fundamentals with TypeScript.
 
-Atlas is a **mini-Notion + RAG + LangGraph agent runtime**. It absorbs two prior ideas as modules:
-- `Mira` → agent loop (plan → act → verify + approvals + audit)
-- `codebase-rag` → retrieval pipeline (ingest → chunk → embed → hybrid search + citations)
+Atlas is a team knowledge platform where users can connect documents, URLs, and codebases, ask questions about them, and eventually let an AI agent take actions based on that knowledge.
 
-Chatbots answer. RAG demos search. Teams need more: **who can access what, what did it cost, was it correct, can the agent act safely.** Atlas answers all four.
+The goal of Atlas isn't to immediately build a production SaaS.
 
----
+The goal is to learn how the pieces of a production backend fit together by actually building them.
 
-## Table of Contents
+Think of Atlas as:
 
-- [Why Atlas](#why-atlas)
-- [Key Features](#key-features)
-- [Stack](#stack)
-- [Architecture](#architecture)
-- [Repository Structure](#repository-structure)
-- [Core Data Models (Prisma)](#core-data-models-prisma)
-- [Core APIs](#core-apis)
-- [RBAC, Auth & Security](#rbac-auth--security)
-- [AI Pipelines in Detail](#ai-pipelines-in-detail)
-  - [1. Ingestion Pipeline](#1-ingestion-pipeline)
-  - [2. Query / RAG Pipeline](#2-query--rag-pipeline)
-  - [3. Agent Runtime](#3-agent-runtime)
-  - [4. Memory Service](#4-memory-service)
-  - [5. Eval Harness](#5-eval-harness)
-- [Observability: Traces, Usage & Cost](#observability-traces-usage--cost)
-- [Getting Started](#getting-started)
-- [Configuration (Env Vars)](#configuration-env-vars)
-- [Development Workflow](#development-workflow)
-- [Testing, Evals & Load Tests](#testing-evals--load-tests)
-- [Roadmap (12 Weeks)](#roadmap-12-weeks)
-- [Done = MVP Success Criteria](#done--mvp-success-criteria)
-- [Troubleshooting & FAQ](#troubleshooting--faq)
-- [Contributing](#contributing)
-- [License & Author](#license--author)
+Notion-like knowledge → RAG → Agents → Background jobs → Permissions → Observability
 
----
+Why Atlas?
 
-## Why Atlas
+A basic RAG application looks like:
 
-**Problem with typical RAG demos:**
-1. No multi-tenancy — one global index, no workspaces or permissions.
-2. No action — can retrieve text but can't open a PR, update a doc, or file a ticket safely.
-3. No accountability — no citations, no token/cost tracking, no audit log.
-4. No quality loop — no evals, no feedback, hallucinations go unnoticed.
-5. Heavy infra — separate vector DB + Mongo + cache + queue eats RAM.
+Document
+   ↓
+Chunk
+   ↓
+Embedding
+   ↓
+Vector Database
+   ↓
+LLM
+   ↓
+Answer
 
-**Atlas fixes this with 5 principles:**
+That's useful for learning retrieval.
 
-1. **Workspace-first multi-tenancy:** Every document, chunk, trace, memory, and agent run belongs to a `Workspace`. RBAC (`owner / editor / viewer`) is enforced at the API + DB + retrieval filter level.
-2. **Relational + vectors in one DB:** Postgres 18 + pgvector + Prisma. No Mongo, no Qdrant for MVP. Saves ~1GB RAM and one operational dependency. Add Qdrant later only if evals prove pgvector recall/latency is insufficient at scale.
-3. **Hybrid retrieval with proof:** `tsvector` keyword + `pgvector <->` semantic + optional cross-encoder rerank. Every answer returns `citations[]` with `documentId`, `chunkId`, and span.
-4. **Agents that ask permission:** LangGraph loop with explicit `approval` gates for side-effect tools, full `Trace` + audit log for every tool call, token, and cost.
-5. **Cost + quality visible:** Per-request and per-workspace usage tracking, nightly eval harness with faithfulness / citation precision / refusal correctness scores.
+But real applications introduce much harder problems:
 
----
+Who is allowed to access this document?
+What happens when 10,000 documents need to be processed?
+What happens if embedding fails halfway through?
+How do we retry background jobs?
+How does an agent use tools safely?
+How do we pause an agent and wait for a human?
+How do we know what the model did?
+How much did a request cost?
+How do we test whether our RAG system is actually getting better?
 
-## Key Features
+Atlas gradually introduces these problems.
 
-### Workspaces & Collaboration
-- Create workspaces, invite members with roles.
-- API keys per workspace with hashed storage, scopes, expiry, and quotas.
-- Rate-limit + monthly token / request quotas per workspace and per key.
+Learning Goals
 
-### Universal Ingestion
-- Sources: `file` (pdf/md/txt/docx), `url` (single page + sitemap crawl via Tavily), `github` (repo snapshot, branch, path filter).
-- Async BullMQ jobs: `upload → parse → clean + PII-redact → chunk → embed → upsert pgvector`.
-- Job status polling (`queued / processing / done / failed`), diff re-index for GitHub (hash + skip unchanged files).
-- Document lifecycle: `pending → processing → ready → failed`, with error + retry count.
+By building Atlas, the main goal is to understand:
 
-### Cited Q&A
-- `POST /v1/query { q, topK, filters }` → `{ answer, citations[], usage }`.
-- Semantic cache (Redis) for identical / near-duplicate queries to cut LLM cost.
-- Streaming support (SSE) for dashboard UX.
-- Guardrails: prompt-injection detector + PII filter on ingest and output.
+Backend
+Express architecture
+TypeScript backend design
+PostgreSQL
+Prisma
+transactions
+indexing
+pagination
+authentication
+RBAC
+API design
+validation
+error handling
+background jobs
+Redis
+queues
+caching
+concurrency
+graceful shutdown
+observability
+Distributed Systems
+asynchronous processing
+producer/consumer systems
+retries
+exponential backoff
+idempotency
+job state machines
+failure recovery
+rate limiting
+eventual consistency
+cache invalidation
+distributed locks
+GenAI
+embeddings
+vector search
+chunking
+retrieval
+hybrid search
+reranking
+prompt construction
+citations
+tool calling
+agent loops
+memory
+evaluation
+Architecture
 
-### Agent Runtime (from Mira)
-- `POST /v1/agent/run { goal, toolsAllowed, maxSteps }` → `{ runId, status, approvals[] }`.
-- LangGraph 1.4 graph: `planner → retriever → actor → verifier → approver`.
-- Tools are allow-listed per workspace (e.g. `github.createIssue`, `docs.update`, `web.search`).
-- High-risk tools pause for human approval via dashboard. All steps append to immutable audit log.
-- Agent can read Atlas knowledge (retriever tool) + external web (Tavily) + act via scoped tools.
+The project starts as a modular monolith.
 
-### Memory
-- Long-term `Memory { fact, confidence, version, workspaceId, userId }`.
-- Auto-extracted from high-quality Q&A / agent runs, editable and versioned.
-- Injected into query / agent context with confidence threshold.
+Later, individual components can be separated when there is an actual reason to do so.
 
-### Evals, Traces & Cost
-- `Trace` per LLM call: model, prompt/completion tokens, latency, cost USD, tool calls, retrieval IDs.
-- `GET /v1/traces`, `GET /v1/usage?from&to` grouped by day/model/user.
-- Nightly `EvalRun` on golden dataset: faithfulness, citation F1, latency p95, cost per query. Scores block deploys if regressed.
+Core Idea
 
-### Dashboard (Next.js 16)
-- Workspace switcher, doc upload + job progress, cited chat UI with streaming.
-- Agent run timeline with approve / reject buttons.
-- Usage/cost charts, trace explorer, eval history.
-- Tailwind + framer-motion for polish, demo-ready.
+A user creates a workspace.
 
----
+Workspace
+   │
+   ├── Members
+   ├── Documents
+   ├── API Keys
+   ├── Agent Runs
+   └── Knowledge
 
-## Stack
+They add knowledge:
 
-| Layer | Choice | Why |
-|---|---|---|
-| **API** | Node 24, Express 5 ESM, zod, JWT + API keys, helmet/cors, pino | Lightweight, ESM-native, strict validation, structured logs. No NestJS overhead for MVP. |
-| **DB** | Postgres 18 + pgvector + Prisma | One DB for relational + vectors. Prisma for migrations + type safety. `tsvector` for hybrid search without extra infra. |
-| **Queue / Cache** | Redis + BullMQ | Ingestion workers, GitHub diff jobs, semantic cache, rate-limit buckets. Single Redis container. |
-| **AI** | LangChain 1.5, LangGraph 1.4, `google-genai` / Groq / Mistral, Tavily search | LangGraph for stateful agent loop. Multi-provider LLMs for cost fallback (Gemini Flash default, Groq Llama for cheap, Mistral for EU). Tavily for fresh web + crawl. |
-| **Dashboard** | Next.js 16, Tailwind, framer-motion | App Router, server components for traces/usage, streaming chat. |
-| **Infra** | Docker Compose (pg + redis only), k6 for load tests | Node apps run natively on Windows for fast iteration; only stateful services in Docker to save RAM. |
-| **Testing** | Vitest, Supertest, k6 | Unit + API + load. Eval harness separate from unit tests. |
-
-**Explicitly out for MVP:** MongoDB, Qdrant / Pinecone / Weaviate, Kubernetes (manifests only in wk 11-12), full billing (stub only).
-
-> RAM budget (~8GB Windows 11): Postgres (~400MB) + Redis (~100MB) + server (~300MB) + worker (~400MB) + dashboard (~400MB) + browser + Docker overhead ≈ fits. Adding Qdrant/Mongo would push +800MB-1GB.
-
----
-
-## Architecture
-
-```
-┌──────────────────────┐
-│  Next.js Dashboard   │  chat, docs, agents, usage, evals
-│  Tailwind + motion   │
-└──────────┬───────────┘
-           │ REST / SSE  Authorization: Bearer JWT or x-api-key
-           ▼
-┌─────────────────────────────────────────────┐
-│  Express 5 API (/v1/*)                      │
-│  helmet, cors, pino, zod, rate-limit        │
-│                                             │
-│  ┌────────────┐  ┌────────────────────────┐ │
-│  │ Workspaces │  │ Ingest controller      │ │
-│  │ RBAC       │  │ POST /ingest -> BullMQ │ │
-│  │ ApiKeys    │  └────────────────────────┘ │
-│  │ Quotas     │  ┌────────────────────────┐ │
-│  └────────────┘  │ Query (hybrid search)  │ │
-│                  │ tsvector + pgvector    │ │
-│                  │ + rerank + citations   │ │
-│                  │ + semantic cache       │ │
-│                  └────────────────────────┘ │
-│                  ┌────────────────────────┐ │
-│                  │ Agent runtime          │ │
-│                  │ LangGraph + approvals  │ │
-│                  │ + audit log            │ │
-│                  └────────────────────────┘ │
-│  Memory service │ Eval harness │ Usage/cost  │
-└──────┬──────────────────┬───────────────────┘
-       │                  │
-       ▼                  ▼
-┌──────────────┐   ┌──────────────┐
-│ Postgres 18  │   │ Redis +      │
-│ + pgvector   │   │ BullMQ       │
-│ Prisma       │   │ cache/queue  │
-└──────────────┘   └──────────────┘
-       ▲
-       │ embed / search
+PDF
+Markdown
+URL
+GitHub repository
+       │
        ▼
-┌────────────────────────────────┐
-│ LLM providers + Tavily         │
-│ Gemini Flash / Groq / Mistral  │
-└────────────────────────────────┘
-```
+   Ingestion
+       │
+       ▼
+     Chunks
+       │
+       ▼
+   Embeddings
+       │
+       ▼
+   PostgreSQL
 
-**Request lifecycle (query example):**
+Then they can ask:
 
-1. Client sends `POST /v1/query` with JWT or API key.
-2. `auth` middleware resolves `workspaceId + userId + scopes`. `quota` middleware checks Redis counters.
-3. `semantic-cache` lookup: normalized query embedding cosine > 0.97 → cache hit, return + log `cached:true` trace.
-4. Else hybrid retrieval: Postgres query filters `workspaceId`, combines `ts_rank` + `embedding <-> $1`, topK*3 → optional rerank → topK.
-5. Prompt builder injects: system guardrails + retrieved chunks (with IDs) + relevant memories.
-6. LLM call (LangChain) with token counting. Answer parser extracts citations, enforces “no citation = refuse / hedge”.
-7. `Trace` + `Usage` rows written, semantic cache set, SSE stream flushed.
-8. Response: `{ answer, citations[{documentId, chunkId, snippet, score}], usage{tokens, costUsd, latencyMs} }`.
+"How does authentication work in this project?"
 
-**Ingestion lifecycle:**
+Atlas retrieves relevant knowledge and generates an answer with citations.
 
-```
-POST /v1/ingest {type, ref} -> jobId (BullMQ)
-worker: fetch -> parse (pdf/md/html/code) -> clean -> PII-redact
-      -> chunk (~800 tokens, 120 overlap, code-aware splitter for github)
-      -> embed (batch) -> pgvector upsert -> Document.status=ready
-GET /v1/jobs/:id -> { status, progress, error }
-```
+Later:
 
-GitHub re-index uses blob SHA to skip unchanged files; deleted files tombstone their chunks.
+"Find the authentication issues and create a GitHub issue for each one."
 
----
+The agent can:
 
-## Repository Structure
+Understand goal
+      ↓
+Search knowledge
+      ↓
+Analyze results
+      ↓
+Plan action
+      ↓
+Request approval
+      ↓
+Execute tool
+      ↓
+Verify result
+Features
 
-Monorepo (planned — currently bootstrapping):
+1. Workspaces
 
-```
-Atlas/
-├── docker-compose.yml        # pgvector (pg18) + redis only
-├── README.md
-├── server/                   # Express 5 API
+Users can create workspaces and collaborate with other users.
+
+Each workspace contains its own:
+
+documents
+members
+API keys
+agent runs
+traces
+usage information
+
+Example:
+
+Acme Engineering
+│
+├── Alice   OWNER
+├── Bob     EDITOR
+└── Charlie VIEWER
+2. Authentication
+
+Atlas supports:
+
+JWT authentication for users
+API keys for programmatic access
+
+Basic flow:
+
+Request
+   ↓
+Authentication
+   ↓
+Identify user
+   ↓
+Identify workspace
+   ↓
+Check permissions
+   ↓
+Execute request
+3. RBAC
+
+The initial roles are:
+
+Permission Owner Editor Viewer
+View workspace ✓ ✓ ✓
+Query knowledge ✓ ✓ ✓
+Upload documents ✓ ✓ ✗
+Delete documents ✓ ✓ ✗
+Manage members ✓ ✗ ✗
+Run agents ✓ ✓ ✓
+Approve actions ✓ ✓ ✗
+
+The important learning goal is not the number of roles.
+
+It's understanding that authorization must happen before business logic executes.
+
+1. Document Ingestion
+
+Atlas initially supports:
+
+Markdown
+TXT
+PDF
+URLs
+GitHub repositories
+
+The ingestion pipeline is asynchronous.
+
+POST /v1/ingest
+        │
+        ▼
+      API
+        │
+        ▼
+      Queue
+        │
+        ▼
+     Worker
+        │
+        ├── Fetch
+        ├── Parse
+        ├── Clean
+        ├── Chunk
+        ├── Embed
+        └── Store
+
+The API does not sit around waiting for a large PDF or repository to finish processing.
+
+It returns a job:
+
+{
+  "jobId": "job_123",
+  "status": "queued"
+}
+
+The client can later check:
+
+GET /v1/jobs/:id
+5. RAG
+
+Atlas uses PostgreSQL + pgvector for the initial implementation.
+
+The basic pipeline:
+
+User Query
+    ↓
+Query Embedding
+    ↓
+Vector Search
+    ↓
+Relevant Chunks
+    ↓
+Prompt Construction
+    ↓
+LLM
+    ↓
+Answer + Citations
+
+A retrieved chunk might look like:
+
+{
+  "id": "chunk_123",
+  "documentId": "doc_42",
+  "content": "Authentication middleware validates...",
+  "score": 0.87
+}
+
+The final response contains citations:
+
+{
+  "answer": "Authentication is handled by the auth middleware...",
+  "citations": [
+    {
+      "documentId": "doc_42",
+      "chunkId": "chunk_123"
+    }
+  ]
+}
+6. Hybrid Search
+
+Vector search isn't always enough.
+
+For example:
+
+"Postgres P1001"
+
+Keyword search can be extremely useful.
+
+Atlas therefore eventually combines:
+
+Keyword Search
+      +
+Vector Search
+      ↓
+Candidate Results
+      ↓
+Optional Reranking
+      ↓
+Top K
+
+The first implementation can simply use vector search.
+
+Hybrid retrieval is introduced later as a learning milestone.
+
+1. Agent Runtime
+
+Once RAG works, Atlas introduces agents.
+
+An agent receives a goal:
+
+"Find open authentication issues and create a GitHub issue
+containing a summary."
+
+The agent can use tools such as:
+
+knowledge.search
+github.searchIssues
+github.createIssue
+web.search
+
+A simplified agent loop:
+
+             ┌─────────────┐
+             │   Planner   │
+             └──────┬──────┘
+                    ↓
+             ┌─────────────┐
+             │   Retriever │
+             └──────┬──────┘
+                    ↓
+             ┌─────────────┐
+             │    Agent    │
+             └──────┬──────┘
+                    ↓
+             ┌─────────────┐
+             │    Tool     │
+             └──────┬──────┘
+                    ↓
+             ┌─────────────┐
+             │   Verifier  │
+             └──────┬──────┘
+                    │
+              ┌─────┴─────┐
+              │           │
+             done       retry
+
+The first version does not need a sophisticated autonomous system.
+
+The goal is to understand:
+
+state
+transitions
+tool calling
+retries
+stopping conditions
+failures
+8. Human Approval
+
+Agents should not automatically perform dangerous actions.
+
+For example:
+
+github.createIssue
+github.deleteBranch
+docs.update
+
+can require approval.
+
+Flow:
+
+Agent
+  ↓
+Tool requested
+  ↓
+Is tool dangerous?
+  │
+  ├── No ──→ Execute
+  │
+  └── Yes
+        ↓
+   Await approval
+        ↓
+   Human approves
+        ↓
+     Execute
+        ↓
+     Verify
+
+This introduces an important concept:
+
+An agent is not just an LLM. It is a state machine around an LLM.
+
+1. Memory
+
+Atlas can store useful facts learned during conversations.
+
+Example:
+
+{
+  "fact": "The platform team uses PostgreSQL for primary storage.",
+  "confidence": 0.91
+}
+
+Memory can later be injected into agent or query context.
+
+Initial memory implementation will be intentionally simple.
+
+The goal is to learn:
+
+memory extraction
+memory retrieval
+confidence
+versioning
+deletion
+context injection
+10. Observability
+
+Every important operation should leave evidence.
+
+For example:
+
+Request
+   ↓
+Trace
+   ├── Retrieval
+   ├── LLM call
+   ├── Tool call
+   └── Database operations
+
+A trace may contain:
+
+{
+  "traceId": "trace_123",
+  "model": "gemini",
+  "promptTokens": 1200,
+  "completionTokens": 300,
+  "latencyMs": 840,
+  "costUsd": 0.0012
+}
+
+This makes questions like these answerable:
+
+Why was this request slow?
+Which model was used?
+How many tokens did it consume?
+Which documents were retrieved?
+Which tools did the agent execute?
+Architecture
+
+Atlas starts with a modular monolith.
+
+                    ┌──────────────────┐
+                    │    Next.js UI    │
+                    └────────┬─────────┘
+                             │
+                       REST / SSE
+                             │
+                             ▼
+              ┌──────────────────────────┐
+              │       Express API        │
+              │                          │
+              │  Auth / RBAC             │
+              │  Workspaces              │
+              │  Documents               │
+              │  Query / RAG              │
+              │  Agents                  │
+              │  Usage                   │
+              └───────┬──────────┬───────┘
+                      │          │
+                      ▼          ▼
+                PostgreSQL     Redis
+                + pgvector     + BullMQ
+                      ▲          │
+                      │          ▼
+                      │       Worker
+                      │          │
+                      │          ├── Parse
+                      │          ├── Chunk
+                      │          └── Embed
+                      │
+                      ▼
+                LLM Providers
+
+The important architectural boundary is:
+
+API
+ │
+ ├── Application Services
+ │
+ ├── Domain Logic
+ │
+ └── Infrastructure
+       ├── PostgreSQL
+       ├── Redis
+       ├── LLM
+       └── External APIs
+
+The project deliberately avoids microservices initially.
+
+Request Lifecycle
+
+For a normal RAG request:
+
+Client
+  │
+  ▼
+POST /v1/query
+  │
+  ▼
+Auth
+  │
+  ▼
+RBAC
+  │
+  ▼
+Query Service
+  │
+  ├── Query normalization
+  │
+  ├── Retrieve chunks
+  │
+  ├── Build context
+  │
+  ├── Call LLM
+  │
+  └── Store trace
+  │
+  ▼
+Answer + Citations
+Ingestion Lifecycle
+Client
+  │
+  ▼
+POST /v1/ingest
+  │
+  ▼
+Create Document
+  │
+  ▼
+Create Job
+  │
+  ▼
+Redis / BullMQ
+  │
+  ▼
+Worker
+  │
+  ├── Fetch
+  ├── Parse
+  ├── Clean
+  ├── Chunk
+  ├── Embed
+  └── Store
+  │
+  ▼
+Document READY
+
+If something fails:
+
+Worker
+  │
+  ▼
+Error
+  │
+  ▼
+Retry
+  │
+  ├── success → DONE
+  │
+  └── failure → FAILED
+
+This is where Atlas starts becoming a backend engineering project rather than just an AI demo.
+
+Repository Structure
+atlas/
+│
+├── server/
 │   ├── src/
-│   │   ├── routes/v1/        # workspaces, ingest, query, agent, usage, traces, evals
-│   │   ├── middleware/       # auth, rbac, rateLimit, quota, validate(zod)
-│   │   ├── services/         # retrieval, memory, llm, cache, cost
-│   │   ├── agent/            # LangGraph graph, tools, approvals
-│   │   ├── lib/              # prisma, redis, logger(pino), config
+│   │   ├── routes/
+│   │   │   └── v1/
+│   │   │
+│   │   ├── middleware/
+│   │   │   ├── auth.ts
+│   │   │   ├── rbac.ts
+│   │   │   └── error.ts
+│   │   │
+│   │   ├── modules/
+│   │   │   ├── auth/
+│   │   │   ├── workspace/
+│   │   │   ├── document/
+│   │   │   ├── query/
+│   │   │   ├── agent/
+│   │   │   └── usage/
+│   │   │
+│   │   ├── services/
+│   │   │   ├── llm/
+│   │   │   ├── retrieval/
+│   │   │   ├── memory/
+│   │   │   └── cost/
+│   │   │
+│   │   ├── lib/
+│   │   │   ├── prisma.ts
+│   │   │   ├── redis.ts
+│   │   │   └── logger.ts
+│   │   │
 │   │   └── index.ts
-│   ├── prisma/schema.prisma
+│   │
+│   ├── prisma/
+│   │   └── schema.prisma
+│   │
 │   └── tests/
-├── worker/                   # BullMQ ingestion workers
+│
+├── worker/
 │   └── src/
-│       ├── processors/       # file, url, github
+│       ├── processors/
+│       │   ├── file.ts
+│       │   ├── url.ts
+│       │   └── github.ts
+│       │
 │       ├── chunk.ts
 │       ├── embed.ts
 │       └── index.ts
-├── dashboard/                # Next.js 16 app
+│
+├── dashboard/
 │   └── app/
-│       ├── (chat)/           # cited Q&A + streaming
-│       ├── docs/             # upload + job status
-│       ├── agents/           # run timeline + approvals
-│       └── usage/            # cost/traces/evals charts
+│
 ├── evals/
-│   ├── datasets/golden.jsonl # {q, expected, mustCite[]}
-│   └── run.ts                # nightly harness
-└── k6/
-    └── load.js               # rps/latency smoke
-```
+│   ├── datasets/
+│   └── run.ts
+│
+├── k6/
+│   └── load.js
+│
+├── docker-compose.yml
+└── README.md
 
-Run Node services natively (`npm run dev`) on Windows; only Postgres + Redis in Docker. This keeps hot-reload fast and RAM low.
+The exact structure may change during development.
 
----
+Architecture should evolve when the code teaches us that the current structure is no longer appropriate.
 
-## Core Data Models (Prisma)
+Core Data Model
 
-```prisma
+The initial database model is intentionally small.
+
+User
+ │
+ └── Member
+       │
+       ▼
+   Workspace
+      │
+      ├── Document
+      │      │
+      │      └── Chunk
+      │
+      ├── ApiKey
+      │
+      ├── AgentRun
+      │
+      ├── Memory
+      │
+      └── Trace
+
+Example Prisma models:
+
 model Workspace {
-  id        String     @id @default(cuid())
+  id        String   @id @default(cuid())
   name      String
+  createdAt DateTime @default(now())
+
   members   Member[]
-  apiKeys   ApiKey[]
   documents Document[]
-  chunks    Chunk[]
+  apiKeys   ApiKey[]
   traces    Trace[]
   memories  Memory[]
-  evalRuns  EvalRun[]
-  createdAt DateTime   @default(now())
 }
 
 model Member {
-  id          String   @id @default(cuid())
+  id          String    @id @default(cuid())
   workspaceId String
   userId      String
-  role        Role     // OWNER | EDITOR | VIEWER
-  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  role        Role
+
+  workspace   Workspace @relation(
+    fields: [workspaceId],
+    references: [id],
+    onDelete: Cascade
+  )
+
   @@unique([workspaceId, userId])
 }
 
-model ApiKey {
-  id          String    @id @default(cuid())
+model Document {
+  id          String     @id @default(cuid())
   workspaceId String
   name        String
-  keyHash     String    @unique // sha256, never store raw
-  keyPrefix   String    // e.g. "ak_8f3a" for identification
-  scopes      String[]  // ["query","ingest","agent"]
-  quotaMonthly Int?
-  expiresAt   DateTime?
-  revokedAt   DateTime?
-  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-}
+  source      String
+  status      DocStatus
+  createdAt   DateTime   @default(now())
 
-model Document {
-  id          String   @id @default(cuid())
-  workspaceId String
-  source      Source   // FILE | URL | GITHUB
-  ref         String   // path / url / repo@branch:path
-  status      DocStatus // PENDING | PROCESSING | READY | FAILED
-  hash        String?  // for diff re-index
-  error       String?
+  workspace   Workspace  @relation(
+    fields: [workspaceId],
+    references: [id],
+    onDelete: Cascade
+  )
+
   chunks      Chunk[]
-  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId])
 }
 
 model Chunk {
   id          String   @id @default(cuid())
-  workspaceId String
   documentId  String
+  workspaceId String
   content     String
   tokens      Int
-  // pgvector: `embedding vector(768|1536)` via raw SQL migration
-  // + tsvector column for hybrid search
-  document    Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  document    Document @relation(
+    fields: [documentId],
+    references: [id],
+    onDelete: Cascade
+  )
+
   @@index([workspaceId])
   @@index([documentId])
 }
 
-model Trace {
-  id          String   @id @default(cuid())
-  workspaceId String
-  userId      String?
-  kind        String   // query | agent_step | eval
-  model       String
-  promptTokens Int
-  completionTokens Int
-  costUsd     Float
-  latencyMs   Int
-  toolCalls   Json?
-  retrievalIds String[]
-  cached      Boolean  @default(false)
-  createdAt   DateTime @default(now())
-}
+Vector columns will initially be added using a PostgreSQL migration because Prisma's support for vector types requires additional handling.
 
-model Memory {
-  id          String   @id @default(cuid())
-  workspaceId String
-  userId      String?
-  fact        String
-  confidence  Float    // 0..1
-  version     Int      @default(1)
-  createdAt   DateTime @default(now())
-}
+Core APIs
 
-model EvalRun {
-  id        String   @id @default(cuid())
-  workspaceId String?
-  dataset   String   // "golden-v1"
-  score     Float    // aggregate 0..1
-  metrics   Json     // {faithfulness, citationF1, refusalAcc, p95Ms, costPerQuery}
-  createdAt DateTime @default(now())
-}
-```
+Base URL:
 
-Key constraints:
-- All retrieval queries **must** filter `workspaceId` — enforced in service layer + Prisma middleware, covered by tests.
-- `ApiKey.keyHash` is SHA-256 of random 32-byte secret; only prefix is reversible for lookup UX.
-- `Chunk.embedding` uses `pgvector` raw migration (`CREATE EXTENSION vector;`) since Prisma has no native vector type yet. Dimension pinned per embedding model (e.g. 768) — changing models requires re-embed migration.
-
----
-
-## Core APIs
-
-Base: `/v1`. Auth: `Authorization: Bearer <JWT>` (dashboard users) or `x-api-key: <key>` (programmatic). All responses are JSON unless SSE.
-
-### Workspaces & Members
-
-```http
+/v1
+Workspaces
 POST /v1/workspaces
-{ "name": "platform-team" }
-→ 201 { "id": "ws_...", "name": "platform-team" }
-
-POST /v1/workspaces/:id/members
-{ "userId": "u_...", "role": "editor" }
-→ 201 { "ok": true }
-```
-
-### Ingestion
-
-```http
+{
+  "name": "Atlas Engineering"
+}
+Ingestion
 POST /v1/ingest
-Authorization: Bearer ...
-{ "type": "file", "ref": "s3://tmp/upload.pdf" }
-{ "type": "url", "ref": "https://docs.example.com/guide" }
-{ "type": "github", "ref": "org/repo@main:docs/" }
+{
+  "type": "url",
+  "ref": "<https://example.com/docs>"
+}
 
-→ 202 { "jobId": "bullmq-id", "documentId": "doc_..." }
+Response:
 
+{
+  "jobId": "job_123",
+  "documentId": "doc_123"
+}
+Job Status
 GET /v1/jobs/:id
-→ 200 { "status": "processing", "progress": 0.6, "error": null }
-→ 200 { "status": "done", "documentId": "doc_...", "chunks": 42 }
-```
+{
+  "status": "processing",
+  "progress": 0.6
+}
 
-Validation (zod): `type` enum, `ref` non-empty + URL/repo format check, workspace quota pre-check → `429` with `Retry-After` if exceeded.
+Possible states:
 
-### Query (RAG)
-
-```http
+queued
+processing
+completed
+failed
+Query
 POST /v1/query
 {
-  "q": "How do we rotate API keys?",
-  "topK": 6,
-  "filters": { "source": "GITHUB" }
+  "q": "How does authentication work?"
 }
 
-→ 200 {
-  "answer": "Rotate via Dashboard > Settings... [1][2]",
+Response:
+
+{
+  "answer": "Authentication is handled by...",
   "citations": [
-    { "documentId": "doc_...", "chunkId": "ch_...", "snippet": "...", "score": 0.87, "ref": "org/repo@main:docs/auth.md#L12-30" }
-  ],
-  "usage": { "tokens": 1820, "costUsd": 0.0018, "latencyMs": 940, "cached": false },
-  "traceId": "tr_..."
+    {
+      "documentId": "doc_123",
+      "chunkId": "chunk_456"
+    }
+  ]
 }
-```
-
-Errors: `403` if no `query` scope / cross-workspace access, `429` quota, `422` zod validation.
-
-### Agent
-
-```http
+Agent
 POST /v1/agent/run
 {
-  "goal": "Summarize open auth issues and draft a fix plan",
-  "toolsAllowed": ["knowledge.search", "github.createIssue", "web.search"],
-  "maxSteps": 12
+  "goal": "Find authentication issues"
 }
-→ 202 { "runId": "run_...", "status": "awaiting_approval", "approvals": [{ "id": "ap_...", "tool": "github.createIssue", "args": {...} }] }
 
-POST /v1/agent/runs/:runId/approve
-{ "approvalId": "ap_...", "decision": "approve" }
-→ 200 { "status": "running" }
+Response:
+
+{
+  "runId": "run_123",
+  "status": "running"
+}
+AI Pipeline
+Phase 1: Ingestion
+Source
+  ↓
+Parser
+  ↓
+Cleaner
+  ↓
+Chunker
+  ↓
+Embedding Model
+  ↓
+PostgreSQL
+Chunking
+
+The first implementation will use approximately:
+
+chunk size: ~800 tokens
+overlap: ~100 tokens
+
+These numbers are starting points, not universal truths.
+
+One of the goals of the project is to experiment with different chunking strategies and evaluate their effect on retrieval.
+
+Phase 2: Retrieval
+
+Initial implementation:
+
+Query
+  ↓
+Embedding
+  ↓
+pgvector
+  ↓
+Top K chunks
+
+Later:
+
+Query
+  │
+  ├───────────────┐
+  ▼               ▼
+Vector Search   Keyword Search
+  │               │
+  └───────┬───────┘
+          ▼
+       Merge
+          ↓
+       Rerank
+          ↓
+        Top K
+Phase 3: Generation
+
+Retrieved chunks become context:
+
+System Instructions
+        +
+User Question
+        +
+Retrieved Context
+        +
+Relevant Memory
+        ↓
+       LLM
+        ↓
+Answer
+
+The model should be instructed to ground its response in the retrieved context.
+
+Phase 4: Agents
+
+Agents are introduced only after the RAG pipeline works.
+
+A basic state might look like:
+
+type AgentState = {
+  goal: string;
+  plan: string[];
+  context: Chunk[];
+  steps: AgentStep[];
+  pendingApproval?: Approval;
+};
+
+The agent graph manages transitions between states.
+
+Phase 5: Memory
+
+Memory is deliberately added later.
+
+Conversation
+     ↓
+Memory Extractor
+     ↓
+Candidate Fact
+     ↓
+Confidence Check
+     ↓
+Store
+     ↓
+Retrieve Later
+
+The first implementation doesn't need sophisticated long-term memory.
+
+The purpose is to understand the architectural problem.
+
+Observability
+
+Atlas will track basic telemetry.
+
+For an LLM request:
+
+traceId
+workspaceId
+userId
+model
+promptTokens
+completionTokens
+latencyMs
+cost
+
+For retrieval:
+
+query
+retrievedChunkIds
+scores
+latency
+
+For agents:
+
+runId
+step
+tool
+arguments
+result
+duration
+
+This creates an execution trail:
+
+Request
+  ↓
+Retrieval
+  ↓
+LLM
+  ↓
+Tool
+  ↓
+LLM
+  ↓
+Response
+Caching
+
+Redis will eventually be used for:
+
+caching
+rate limiting
+job queues
+temporary state
+
+The first cache implementation should be simple.
+
+For example:
+
+normalized query
+       ↓
+Redis
+       ↓
+cache hit?
+   │       │
+  yes      no
+   │       │
+return    RAG
+           │
+           ▼
+         Redis
+
+Semantic caching is intentionally a later feature.
+
+Background Jobs
+
+BullMQ is used to understand asynchronous backend processing.
+
+Example:
+
+API
+ │
+ │ add job
+ ▼
+Redis
+ │
+ ▼
+BullMQ
+ │
+ ▼
+Worker
+ │
+ ├── process
+ ├── retry
+ └── complete
+
+Important concepts to learn:
+
+job states
+retries
+exponential backoff
+concurrency
+idempotency
+dead-letter handling
+graceful shutdown
+Failure Handling
+
+Failures are expected.
+
+For example:
+
+Embedding API
+     │
+     ▼
+   timeout
+     │
+     ▼
+   retry
+     │
+     ▼
+   timeout
+     │
+     ▼
+   retry
+     │
+     ▼
+   success
+
+But some failures should not retry forever.
+
+Eventually:
+
+FAILED
+  ↓
+error stored
+  ↓
+visible to user
+
+This is one of the main backend-learning parts of Atlas.
+
+Security
+
+Atlas will implement basic security practices:
+
+password hashing
+JWT authentication
+API-key hashing
+RBAC
+input validation with Zod
+rate limiting
+request size limits
+CORS configuration
+Helmet
+basic prompt-injection handling
+workspace isolation
+
+The most important invariant is:
+
+A user must never retrieve data
+from a workspace they do not have access to.
+
+Conceptually:
+
+WHERE workspace_id = current_workspace
+
+Every retrieval path must preserve this invariant.
+
+Technology Stack
+Area Technology
+Language TypeScript
+Runtime Node.js
+API Express
+Validation Zod
+Database PostgreSQL
+ORM Prisma
+Vector Search pgvector
+Cache Redis
+Queue BullMQ
+AI LangChain
+Agents LangGraph
+Web Search Tavily
+Frontend Next.js
+Styling Tailwind CSS
+Testing Vitest + Supertest
+Load Testing k6
+Local Infrastructure Docker Compose
+Why this stack?
+
+The goal isn't to use every popular tool.
+
+The goal is to learn how a relatively small set of technologies can solve increasingly complex problems.
+
+What Is Explicitly NOT Being Built Initially?
+
+Atlas is intentionally not starting with:
+
+Kubernetes
+microservices
+Qdrant
+Kafka
+complex billing
+multi-region deployment
+distributed tracing infrastructure
+sophisticated semantic caching
+custom LLM hosting
+complex event sourcing
+elaborate CI/CD infrastructure
+
+Those technologies may become useful later.
+
+But adding infrastructure before understanding the underlying problem usually produces architecture cosplay.
+
+Atlas is about learning the why before collecting the what.
+
+Development Roadmap
+
+The roadmap is progressive rather than deadline-driven.
+
+Stage 1 — Backend Foundation
+
+Build:
+
+Express server
+TypeScript
+Zod
+PostgreSQL
+Prisma
+migrations
+error handling
+logging
+basic REST APIs
+Goal
+
+Understand the request lifecycle:
+
+HTTP
+ ↓
+Router
+ ↓
+Controller
+ ↓
+Service
+ ↓
+Repository
+ ↓
+Database
+Stage 2 — Authentication & Workspaces
+
+Build:
+
+users
+login
+JWT
+workspaces
+members
+roles
+RBAC middleware
+Goal
+
+Understand multi-tenant authorization.
+
+Important invariant:
+
+workspace A ≠ workspace B
+
+A request authenticated as a member of A must never accidentally query B.
+
+Stage 3 — Document System
+
+Build:
+
+document CRUD
+file uploads
+document status
+metadata
+deletion
+database indexes
+Goal
+
+Become comfortable with PostgreSQL-backed application design.
+
+Stage 4 — Background Jobs
+
+Introduce:
+
+Redis
+BullMQ
+workers
+retries
+job status
+concurrency
+
+Architecture becomes:
+
+API → Queue → Worker → Database
+Goal
+
+Understand asynchronous processing.
+
+Stage 5 — RAG
+
+Build:
+
+document parsing
+chunking
+embeddings
+pgvector
+similarity search
+prompt construction
+citations
+Goal
+
+Build a complete RAG pipeline yourself.
+
+Document → Chunk → Embed → Store
+                         ↓
+Query → Embed → Retrieve → LLM
+Stage 6 — Better Retrieval
+
+Add:
+
+metadata filtering
+keyword search
+hybrid retrieval
+reranking experiments
+retrieval evaluation
+Goal
+
+Understand why:
+
+"better embeddings"
+
+isn't always equivalent to:
+
+"better retrieval"
+Stage 7 — Agent Runtime
+
+Introduce LangGraph.
+
+Build:
+
+agent state
+planner
+retrieval tool
+tool calling
+execution loop
+maximum steps
+failure handling
+Goal
+
+Understand agents as stateful systems rather than magical chatbots.
+
+Stage 8 — Human Approval
+
+Add:
+
+approval requests
+pause/resume
+risky-tool classification
+approval API
+audit records
+
+Example:
+
+Agent
+ ↓
+github.createIssue
+ ↓
+Approval Required
+ ↓
+WAITING
+ ↓
+Human approves
+ ↓
+Resume
+ ↓
+Tool executes
+Goal
+
+Learn how to build systems where autonomous execution still has explicit control boundaries.
+
+Stage 9 — Memory
+
+Add:
+
+memory extraction
+confidence
+memory retrieval
+editing
+deletion
+versioning
+Goal
+
+Understand context management beyond a single conversation.
+
+Stage 10 — Observability
+
+Add:
+
+request IDs
+trace IDs
+LLM usage
+latency
+token tracking
+cost calculation
+agent traces
+Goal
+
+Answer:
+
+"What exactly happened during this request?"
+
+Stage 11 — Evaluation
+
+Create a small golden dataset:
+
+{
+  "question": "How is authentication implemented?",
+  "expected": "...",
+  "mustContain": ["JWT", "middleware"]
+}
+
+Evaluate:
+
+retrieval quality
+citation correctness
+answer quality
+latency
+cost
+Goal
+
+Learn that AI systems need measurement, not just demos.
+
+Stage 12 — Performance & Scale
+
+Only after the system works:
+
+add indexes
+investigate slow queries
+load test with k6
+tune worker concurrency
+measure Redis performance
+investigate PostgreSQL query plans
+optimize embedding batches
+introduce caching
+
+Then ask:
+
+What is actually slow?
+
+Instead of:
+
+What infrastructure can I add?
+
+MVP Definition
+
+Atlas is considered a successful learning project when this works end-to-end:
+
+Create Workspace
+       ↓
+Upload Document
+       ↓
+Background Worker Processes It
+       ↓
+Chunks + Embeddings Stored
+       ↓
+Ask Question
+       ↓
+Relevant Chunks Retrieved
+       ↓
+LLM Generates Answer
+       ↓
+Answer Contains Citations
+       ↓
+Trace Is Recorded
+       ↓
+Agent Uses Knowledge
+       ↓
+Agent Requests Approval
+       ↓
+Human Approves
+       ↓
+Tool Executes
 
-GET /v1/agent/runs/:runId
-→ 200 { "status": "done", "steps": [...], "auditLog": [...], "usage": {...} }
-```
+That is enough.
 
-Side-effect tools never execute without an `approve` record from `owner/editor`. `viewer` can run read-only agents.
+Everything after this is optimization, experimentation, and deeper systems engineering.
 
-### Observability
+Testing Strategy
 
-```http
-GET /v1/usage?from=2026-08-01&to=2026-09-09&groupBy=day
-→ 200 { "rows": [{ "day": "2026-09-08", "tokens": 41200, "costUsd": 0.042, "queries": 61 }] }
+Atlas uses several layers of testing.
 
-GET /v1/traces?limit=20&kind=query
-→ 200 { "traces": [{ "id": "tr_...", "model": "gemini-2.0-flash", ... }] }
+Unit Tests
 
-GET /v1/evals?limit=10
-→ 200 { "runs": [{ "id": "ev_...", "score": 0.84, "metrics": {...} }] }
-```
+Test individual pieces:
 
-Full OpenAPI / zod schemas live in `server/src/routes/v1/*.ts` (source of truth). Dashboard uses generated fetchers.
+chunker
+RBAC rules
+cost calculation
+query normalization
+agent transitions
+API Tests
 
----
+Test:
 
-## RBAC, Auth & Security
+authentication
+authorization
+document APIs
+query APIs
+agent APIs
+Integration Tests
 
-| Capability | Owner | Editor | Viewer | API key (scoped) |
-|---|---|---|---|---|
-| Manage members / keys | ✅ | ❌ | ❌ | ❌ |
-| Ingest / delete docs | ✅ | ✅ | ❌ | only with `ingest` scope |
-| Query | ✅ | ✅ | ✅ | only with `query` scope |
-| Run read-only agent | ✅ | ✅ | ✅ | only with `agent` scope |
-| Approve risky tools | ✅ | ✅ | ❌ | ❌ (human JWT only) |
-| View usage/traces/evals | ✅ | ✅ | ✅ (own) | ❌ |
+Test:
 
-Hardening:
-- `helmet`, `cors` allow-list, `express-rate-limit` + Redis quota counters.
-- `zod` validation on every input; file type + size limits; HTML sanitization on URL ingest.
-- JWT short-lived (15m) + refresh rotation; API keys hashed with SHA-256 + prefix lookup.
-- PII redaction (regex + LLM pass for emails/secrets) before embedding; prompt-injection classifier flags `ignore previous instructions`-style chunks and downranks them.
-- Audit log is append-only — no `UPDATE/DELETE` route exposes it.
+API
+ ↓
+PostgreSQL
+ ↓
+Redis
+ ↓
+Worker
+RAG Evaluation
 
----
+Test whether retrieval and generated answers are actually useful.
 
-## AI Pipelines in Detail
+Load Testing
 
-### 1. Ingestion Pipeline
+Use k6 to understand:
 
-1. **Fetch:** file buffer / URL HTML (Tavily extract) / GitHub tarball via API.
-2. **Parse:** `pdf-parse` / markdown / `cheerio` readability / code files kept with path + line numbers.
-3. **Clean:** normalize whitespace, strip nav/boilerplate, detect language.
-4. **PII-redact:** emails, phones, `sk-...`, `x-api-key`, JWTs → `[REDACTED:<type>]`. Original never embedded.
-5. **Chunk:** ~800 tokens, 120 overlap. Markdown header-aware; code splitter respects functions (tree-sitter-lite heuristic). Each chunk stores `ref` span for citations.
-6. **Embed:** batched (64/chunk batch) via Gemini embeddings (768d) — swappable. Cost logged per batch.
-7. **Upsert:** Prisma `$executeRaw` with `embedding` vector + `to_tsvector` in one transaction. Update `Document.status`.
+requests/sec
+latency
+error rate
+database pressure
+worker throughput
+Local Development
 
-Failure handling: per-file try/catch, `retry: 3` with backoff in BullMQ, `Document.error` surfaced via `GET /jobs/:id`.
+Only stateful infrastructure runs in Docker:
 
-### 2. Query / RAG Pipeline
+Docker
+ ├── PostgreSQL
+ └── Redis
 
-1. Normalize query (lowercase, trim) → check Redis semantic cache (embedding cosine ≥ 0.97, same workspace + filters).
-2. Hybrid SQL: `WHERE workspaceId = $1` + `(ts_rank + (1 - (embedding <-> $2)) * weight)` → `LIMIT topK*3`.
-3. Optional rerank (Cohere / local cross-encoder — behind flag, off by default to save RAM).
-4. Build grounded prompt: “Answer ONLY from context. Cite [n] per claim. If insufficient, say so.”
-5. LLM call with timeout + fallback chain: `gemini-2.0-flash → groq-llama-3.3-70b → mistral-small`.
-6. Post-check: citation coverage ≥ 1 per 2 sentences else trigger repair call or refusal. Injection-flagged chunks require 2+ corroborating sources.
-7. Write `Trace`, update `Usage`, set cache (TTL 24h), return.
+Node services run directly on the machine.
 
-Target: p95 < 2s (cached < 200ms), citation precision ≥ 0.8 on golden set.
+docker compose up -d
 
-### 3. Agent Runtime
+Then:
 
-LangGraph 1.4 state machine:
+cd server
+npm install
+npm run dev
 
-```
-planner → retriever → actor → verifier ─┬─> done
-              ▲            │             │
-              └──── approver (if risky) ─┘
-```
+Worker:
 
-- **State:** `{ goal, plan[], context[], steps[], approvals[], usage }` persisted per step for resume.
-- **Tools:** `knowledge.search` (Atlas retrieval), `web.search` (Tavily), `github.*`, `docs.*` — allow-listed per call via `toolsAllowed`.
-- **Approvals:** actor emits `approvalRequest` for write/external tools → run pauses (`awaiting_approval`) → dashboard approves/rejects → graph resumes. Timeout auto-rejects after 24h.
-- **Verifier:** LLM critic checks plan completion + citation grounding before `done`. Failed verification loops back (max `maxSteps`).
-- Every transition writes audit entries queryable via `GET /agent/runs/:id`.
+cd worker
+npm install
+npm run dev
 
-### 4. Memory Service
+Dashboard:
 
-- Extractor runs on `query` traces rated helpful (thumbs-up) or `agent` runs marked done: LLM proposes `fact` + `confidence`.
-- Confidence < 0.6 discarded; ≥ 0.6 stored versioned. User edits bump `version`.
-- Retrieval injects top-3 memories (confidence ≥ 0.7) into system prompt with `[memory]` tag.
-- `DELETE /memories/:id` for GDPR-style removal; workspace wipe cascades.
+cd dashboard
+npm install
+npm run dev
 
-### 5. Eval Harness
+This keeps development relatively lightweight.
 
-- Dataset: `evals/datasets/golden.jsonl` — ~50 curated Q&A with `mustCite` doc IDs + refusal cases + adversarial injection cases.
-- Nightly (or `npm run eval`): runs all queries against pinned code + data snapshot, scores:
-  - `faithfulness` (LLM judge: claims supported?)
-  - `citationF1` (predicted vs gold doc IDs)
-  - `refusalAcc` (correctly refused unanswerable?)
-  - `p95Ms`, `costPerQuery`
-- `EvalRun` row + dashboard badge. CI fails if `score` drops > 0.05 vs rolling average.
+Environment Variables
 
----
+Example:
 
-## Observability: Traces, Usage & Cost
+DATABASE_URL=postgresql://atlas:atlas@localhost:5432/atlas
 
-- **Trace:** one row per LLM/embedding/tool call. Includes model, tokens, `costUsd` (per-model price table in `server/src/services/cost.ts`), latency, retrieval IDs, `cached` flag.
-- **Usage:** aggregated view (`GET /v1/usage`) by day / model / user for billing stub and quota enforcement.
-- **Logs:** `pino` JSON logs with `requestId`, `workspaceId`, `traceId` correlation. Pretty-printed in dev.
-- **Dashboards:** cost-over-time, top queries, cache hit rate, eval trend — all from existing tables, no extra APM needed for MVP.
+REDIS_URL=redis://localhost:6379
 
-Pricing is config-driven so switching `gemini-flash → groq` instantly reflects in cost math.
+JWT_SECRET=your-secret
 
----
+GOOGLE_API_KEY=your-key
 
-## Getting Started
+TAVILY_API_KEY=your-key
 
-### Prerequisites
+PORT=4000
 
-- Node 24+, npm 10+
-- Docker Desktop (Windows 11) + WSL2 backend
-- Git
-- API keys: Google AI (`GOOGLE_API_KEY`), Tavily (`TAVILY_API_KEY`) — Groq/Mistral optional
+NEXT_PUBLIC_API_URL=<http://localhost:4000>
 
-Verify:
+Never commit real secrets.
 
-```bash
-node -v   # v24.x
-docker -v # 24+
-```
+Engineering Principles
 
-### 1. Clone & install
+Atlas follows a few rules.
 
-```bash
-# E:/Main Projects/OnGoing/Atlas
-git clone <repo-url> .
-# when bootstrapped:
-# npm install --workspaces  (or per-package below)
-```
+1. Understand before abstracting
 
-### 2. Start stateful services only
+Don't create five interfaces for something that currently has one implementation.
 
-```bash
-docker compose up -d          # pgvector (pg18) + redis
-docker compose ps             # both healthy
-```
+1. Measure before optimizing
 
-`docker-compose.yml` exposes `5432` (pg) and `6379` (redis) to host. Node apps run on host for speed.
+If PostgreSQL is slow:
 
-### 3. Configure env
+measure
+  ↓
+EXPLAIN ANALYZE
+  ↓
+identify bottleneck
+  ↓
+optimize
 
-```bash
-cp server/.env.example server/.env
-cp worker/.env.example worker/.env
-cp dashboard/.env.example dashboard/.env
-```
+Don't immediately add another database.
 
-See [Configuration](#configuration-env-vars) for full table.
+1. Prefer simple architecture first
 
-### 4. Migrate + run
+Start:
 
-```bash
-cd server && npm install && npx prisma migrate dev && npm run dev
-# new terminal:
-cd ../worker && npm install && npm run dev
-# new terminal:
-cd ../dashboard && npm install && npm run dev
-```
+Modular Monolith
 
-Open:
-- API health: `http://localhost:4000/health`
-- Dashboard: `http://localhost:3000`
-- Prisma Studio: `npx prisma studio` (in `server/`)
+not:
 
-### 5. Smoke test (once code exists)
+Microservices + Kafka + Kubernetes + 14 dashboards
+4. Make failures explicit
 
-```bash
-# create workspace
-curl -X POST localhost:4000/v1/workspaces -H "Content-Type: application/json" -H "Authorization: Bearer <JWT>" -d "{\"name\":\"demo\"}"
+Every asynchronous operation should have a meaningful state.
 
-# ingest a URL
-curl -X POST localhost:4000/v1/ingest -H "Content-Type: application/json" -H "Authorization: Bearer <JWT>" -d "{\"type\":\"url\",\"ref\":\"https://example.com\"}"
+QUEUED
+PROCESSING
+COMPLETED
+FAILED
+5. Preserve invariants
 
-# query (after job done)
-curl -X POST localhost:4000/v1/query -H "Content-Type: application/json" -H "Authorization: Bearer <JWT>" -d "{\"q\":\"What is this about?\",\"topK\":5}"
-```
-
----
-
-## Configuration (Env Vars)
-
-| Var | Where | Required | Example / Notes |
-|---|---|---|---|
-| `DATABASE_URL` | server, worker | ✅ | `postgresql://atlas:atlas@localhost:5432/atlas?schema=public` |
-| `REDIS_URL` | server, worker | ✅ | `redis://localhost:6379` |
-| `JWT_SECRET` | server | ✅ | 32+ random bytes, `openssl rand -hex 32` |
-| `GOOGLE_API_KEY` | server, worker | ✅ | Default LLM + embeddings |
-| `TAVILY_API_KEY` | server, worker | ✅ | Web search + URL extract |
-| `GROQ_API_KEY` | server | ⬜ | Cheap fallback LLM |
-| `MISTRAL_API_KEY` | server | ⬜ | Alt fallback |
-| `PORT` | server | ⬜ | Default `4000` |
-| `LOG_LEVEL` | server, worker | ⬜ | `debug` dev / `info` prod |
-| `EMBEDDING_DIM` | worker | ⬜ | `768`, must match migration |
-| `RERANK_ENABLED` | server | ⬜ | `false` for MVP |
-| `NEXT_PUBLIC_API_URL` | dashboard | ✅ | `http://localhost:4000` |
-
-Never commit `.env`. `.env.example` files are the contract.
-
----
-
-## Development Workflow
-
-```bash
-# server
-npm run dev        # tsx watch + pino-pretty
-npm run build && npm start
-npm run lint && npm run typecheck
-npx prisma migrate dev --name <change>
-npx prisma studio
-
-# worker
-npm run dev        # BullMQ + board at :3001 (dev only)
-
-# dashboard
-npm run dev        # next dev --turbo
-npm run build
-```
-
-Conventions:
-- ESM only (`"type": "module"`), `.js` import suffixes in TS.
-- `zod` schemas co-located with routes; shared types in `server/src/schemas/`.
-- Prisma migrations are the only way to change DB — no ad-hoc SQL in prod.
-- Every new tool / route needs: zod schema + RBAC check + trace write + test.
-- Commits: `feat(server): ...`, `fix(worker): ...`, `docs: ...`.
-
----
-
-## Testing, Evals & Load Tests
-
-```bash
-# unit + API (server)
-npm run test              # vitest
-npm run test:api          # supertest against ephemeral pg
-
-# eval harness (quality gate)
-npm run eval              # runs golden.jsonl, writes EvalRun
-
-# load (k6, needs API running)
-k6 run k6/load.js         # 50 VUs, p95 + error-rate thresholds
-```
-
-What’s covered:
-- Auth/RBAC matrix (viewer cannot ingest/approve; cross-workspace 403).
-- Retrieval isolation (workspace A chunks never leak to B).
-- Citation enforcement (no naked claims).
-- Approval gate (risky tool pauses without human JWT).
-- Quota/rate-limit (`429` shape).
-- k6 thresholds: `p(95) < 2000ms`, `error_rate < 1%` at 20 RPS query mix.
-
----
-
-## Roadmap (12 Weeks)
-
-- **Wk 1–2: Auth + workspaces + 1 file ingest → query works**
-  Deliver: JWT + workspace CRUD + `ingest(file)` worker + `query` hybrid search + 1 cited answer in dashboard.
-  Exit: upload 1 PDF → ask → get cited answer + trace row.
-
-- **Wk 3–4: GitHub / URL connectors, diff re-index, quotas / rate-limit**
-  Deliver: `github` + `url` processors, SHA diff skip, Redis quotas + `429`s, `GET /usage`.
-  Exit: index a repo, push a commit, re-ingest skips unchanged files; quota blocks over-limit key.
-
-- **Wk 5–6: Agent loop from Mira + approval + audit**
-  Deliver: LangGraph graph, 4+ tools, approval pause/resume, `GET /agent/runs/:id` audit view.
-  Exit: “open a GitHub issue for X” pauses → approve in UI → issue created + audit shows every step.
-
-- **Wk 7–8: Memory + semantic cache + streaming UI**
-  Deliver: memory extractor + injection, Redis semantic cache (hit-rate chart), SSE streaming chat.
-  Exit: repeated question returns cached in <200ms; helpful answer becomes reusable memory.
-
-- **Wk 9–10: Nightly evals + PII / injection filters**
-  Deliver: golden dataset (50+), nightly `EvalRun`, PII redactor, injection flagger + refusal tests.
-  Exit: eval dashboard green; PII never embedded (test proves it); injection demo correctly refused.
-
-- **Wk 11–12: Billing stub, k8s manifests, k6 test, demo gif**
-  Deliver: quota → price math + invoice stub, `k8s/` manifests, k6 thresholds passing, polished README + 60s demo.
-  Exit: public demo: 1 workspace, 1 doc, 1 cited answer + 1 approval-gated action, cost visible.
-
----
-
-## Done = MVP Success Criteria
-
-> One workspace, one doc, one cited answer + one approval-gated agent action, with cost visible. Then scale.
-
-Checklist:
-- [ ] Create workspace + invite viewer (RBAC enforced, tested)
-- [ ] Ingest 1 doc (job `done`, chunks in pgvector)
-- [ ] Query returns answer with ≥1 valid citation
-- [ ] Agent run pauses for approval → approve → side effect happens + audit log complete
-- [ ] `GET /usage` shows tokens + USD for above
-- [ ] `npm run eval` passes + k6 p95 < 2s
-- [ ] Dashboard demo runs end-to-end on fresh `docker compose up`
-
----
-
-## Troubleshooting & FAQ
-
-**`docker compose up` fails on Windows?**
-Ensure Docker Desktop WSL2 backend is on. Run PowerShell as admin once: `wsl --update`. Prune stale volumes only if you can lose data: `docker compose down -v`.
-
-**Prisma `P1001: Can't reach database`?**
-PG container not ready or `DATABASE_URL` host wrong. Use `localhost:5432` when Node runs on host (not `db:5432` — that hostname only works inside Docker network). Wait 5s after `up -d`, then `npx prisma migrate dev`.
-
-**BullMQ jobs stuck in `waiting`?**
-Worker not running or `REDIS_URL` mismatch. Start `worker` in a second terminal and confirm same Redis DB. Check Bull Board / `GET /jobs/:id`.
-
-**`401/403` on every call?**
-JWT expired (15m) — refresh. API key path needs `x-api-key` header (not `Authorization`) + correct workspace + non-revoked + `scopes` including the route.
-
-**Embeddings dimension mismatch?**
-You changed provider without migrating. `EMBEDDING_DIM` must match the `vector(N)` column. Re-embed path: new migration → truncate chunks → re-run ingest.
-
-**Out of RAM (8GB)?**
-Only `pg + redis` in Docker — never add Qdrant/Mongo locally. Close Prisma Studio + extra browser tabs during `worker` backfills. Lower embed batch to 16.
-
-**Why not Qdrant?**
-pgvector recall is fine to ~1M chunks and saves a whole container. If evals show recall/latency regression at scale, add Qdrant as a sidecar behind the same `retrieval` interface — no API change.
-
----
-
-## Contributing
-
-PRs welcome. Keep it lean:
-
-1. Fork → branch (`feat/<scope>-<short>`).
-2. Add/adjust zod schema + Prisma migration + tests + trace coverage.
-3. `npm run lint && npm run typecheck && npm run test` green.
-4. Update this README + `evals/datasets/golden.jsonl` if behavior changes.
-5. Open PR with what/why, cost impact, and demo (screenshot or trace ID).
-
-No secrets in PRs. No direct pushes to `main`.
-
----
-
-## License & Author
-
-MIT (planned — add `LICENSE` before public release).
-
-Built and maintained by **Keshav (Keshavcodes3)** — backend-first GenAI engineer. Atlas is the portfolio centerpiece: workspaces, hybrid RAG, permissioned agents, and evals in one lean, production-minded backend.
+The most important Atlas invariant:
+
+workspaceId must propagate through every
+authorization and retrieval boundary.
+6. Build features in vertical slices
+
+Instead of:
+
+Build entire database
+Build entire backend
+Build entire AI system
+Build frontend
+
+Build:
+
+Create workspace
+     ↓
+API
+     ↓
+Database
+     ↓
+UI
+
+Then:
+
+Upload document
+     ↓
+Queue
+     ↓
+Worker
+     ↓
+Database
+     ↓
+UI
+
+Then:
+
+Query
+     ↓
+Retrieval
+     ↓
+LLM
+     ↓
+Citations
+
+This keeps every stage executable.
+
+What I Expect to Learn From Atlas
+
+By the end, I should be able to explain:
+
+Backend
+How an HTTP request moves through an application.
+Where business logic belongs.
+How transactions work.
+How PostgreSQL indexes affect queries.
+How authentication differs from authorization.
+How multi-tenancy can fail.
+Distributed Systems
+Why background jobs exist.
+How queues work.
+Why retries can create duplicate work.
+What idempotency means.
+How rate limiting works.
+Why caches are difficult to invalidate.
+What eventual consistency looks like in practice.
+RAG
+How embeddings represent semantic relationships.
+How vector search works.
+Why chunking affects retrieval.
+Why retrieval quality matters more than simply increasing context.
+How citations can be tied back to source chunks.
+Agents
+Why an agent is fundamentally a state machine.
+How tools are represented.
+How execution can be paused.
+Why approvals matter.
+How agents fail.
+Production Thinking
+How to measure latency.
+How to track cost.
+How to inspect failures.
+How to load test.
+How to identify bottlenecks.
+When infrastructure should actually be introduced.
+Final Architecture
+
+The final learning architecture should roughly look like:
+
+                         ┌──────────────────┐
+                         │     Next.js      │
+                         │    Dashboard     │
+                         └────────┬─────────┘
+                                  │
+                              HTTP / SSE
+                                  │
+                                  ▼
+                   ┌──────────────────────────┐
+                   │       Express API        │
+                   │                          │
+                   │ Auth / RBAC              │
+                   │ Workspaces               │
+                   │ Documents                │
+                   │ Query / RAG              │
+                   │ Agents                   │
+                   │ Usage / Traces           │
+                   └───────┬──────────┬───────┘
+                           │          │
+                           │          ▼
+                           │       Redis
+                           │          │
+                           │       BullMQ
+                           │          │
+                           │          ▼
+                           │        Worker
+                           │          │
+                           │    ┌─────┴─────┐
+                           │    │           │
+                           │  Parse       Embed
+                           │    │           │
+                           │    └─────┬─────┘
+                           │          │
+                           ▼          ▼
+                    ┌─────────────────────┐
+                    │     PostgreSQL      │
+                    │                     │
+                    │ Relational Data     │
+                    │ + pgvector          │
+                    └──────────┬──────────┘
+                               │
+                               ▼
+                       ┌───────────────┐
+                       │ LLM Providers │
+                       └───────────────┘
+
+The architecture is intentionally allowed to evolve.
+
+If a bottleneck appears, investigate it.
+
+If a boundary becomes painful, redesign it.
+
+If a new infrastructure component solves a demonstrated problem, introduce it.
+
+Don't build the architecture you think a 10-million-user company needs.
+
+Build the architecture that teaches you why a 10-million-user company needs it.
+
+Status
+
+🚧 Learning Project / In Development
+
+Atlas is being built primarily as an engineering learning project.
+
+It is not intended to be production-ready software.
+
+The architecture, APIs, database schema, and technology choices will evolve as new concepts are learned and tested.
+
+License
+
+MIT
