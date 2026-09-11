@@ -1,9 +1,11 @@
 import {
   LoginInput,
   RegisterInput,
-} from "./auth.schema";
-import { AuthRepository } from "./auth.repository";
-import { AuthUtils } from "./auth.utils";
+} from "./auth.schema.js";
+import { AuthRepository } from "./auth.repository.js";
+import { AuthUtils } from "./auth.utils.js";
+import { AppError } from "../../lib/errors.js";
+import { IUser } from "./auth.model.js";
 
 export class AuthService {
   constructor(
@@ -12,28 +14,36 @@ export class AuthService {
   ) {}
 
   async register(input: RegisterInput) {
+    const email = normalizeEmail(input.email);
+
     const existingUser =
-      await this.repository.findByEmail(
-        input.email,
-      );
+      await this.repository.findByEmail(email);
 
     if (existingUser) {
-      throw new Error("User already exists");
+      throw AppError.conflict("User already exists");
     }
 
     const hashedPassword =
-      await this.utils.hashPassword(
-        input.password,
-      );
+      await this.utils.hashPassword(input.password);
 
-    const user = await this.repository.create({
-      name: input.name,
-      email: input.email,
-      password: hashedPassword,
-    });
+    let user: IUser;
+
+    try {
+      user = await this.repository.create({
+        name: input.name.trim(),
+        email,
+        password: hashedPassword,
+      });
+    } catch (error) {
+      // Race guard: two concurrent registers with the same email.
+      if (isDuplicateKeyError(error)) {
+        throw AppError.conflict("User already exists");
+      }
+      throw error;
+    }
 
     const token = this.utils.generateToken(
-      user.id,
+      userIdOf(user),
     );
 
     return {
@@ -45,11 +55,11 @@ export class AuthService {
   async login(input: LoginInput) {
     const user =
       await this.repository.findByEmail(
-        input.email,
+        normalizeEmail(input.email),
       );
 
     if (!user) {
-      throw new Error(
+      throw AppError.unauthorized(
         "Invalid email or password",
       );
     }
@@ -61,13 +71,13 @@ export class AuthService {
       );
 
     if (!validPassword) {
-      throw new Error(
+      throw AppError.unauthorized(
         "Invalid email or password",
       );
     }
 
     const token = this.utils.generateToken(
-      user.id,
+      userIdOf(user),
     );
 
     return {
@@ -81,18 +91,35 @@ export class AuthService {
       await this.repository.findById(userId);
 
     if (!user) {
-      throw new Error("User not found");
+      throw AppError.notFound("User not found");
     }
 
     return this.serializeUser(user);
   }
 
-  private serializeUser(user: any) {
+  private serializeUser(user: IUser) {
     return {
-      id: user.id,
+      id: userIdOf(user),
       name: user.name,
       email: user.email,
       createdAt: user.createdAt,
     };
   }
+}
+
+function normalizeEmail(email: string): string {
+  return email.trim().toLowerCase();
+}
+
+function userIdOf(user: IUser): string {
+  return String(user._id);
+}
+
+function isDuplicateKeyError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { code: unknown }).code === 11000
+  );
 }

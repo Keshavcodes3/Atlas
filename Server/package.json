@@ -5,8 +5,10 @@
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "npx tsx src/app.ts",
-    "dev": "npx tsx watch server.ts"
+    "start": "npx tsx server.ts",
+    "dev": "npx tsx watch server.ts",
+    "build": "npx tsc -p tsconfig.json",
+    "typecheck": "npx tsc --noEmit",
   },
   "keywords": [],
   "type": "module",

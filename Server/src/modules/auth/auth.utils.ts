@@ -6,16 +6,18 @@ export interface JwtPayload {
 }
 
 export class AuthUtils {
-  private readonly jwtSecret: string;
-
-  constructor() {
+  // The secret is read lazily (not in the constructor) so that
+  // importing the auth module never crashes the process at boot
+  // time. Misconfiguration surfaces as a 500 with a clear message
+  // on the first sign/verify call instead.
+  private get jwtSecret(): string {
     const secret = process.env.JWT_SECRET;
 
     if (!secret) {
       throw new Error("JWT_SECRET is not defined");
     }
 
-    this.jwtSecret = secret;
+    return secret;
   }
 
   async hashPassword(
