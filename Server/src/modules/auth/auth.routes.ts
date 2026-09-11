@@ -1,9 +1,10 @@
 import { Router } from "express";
 
 import { AuthController } from "./auth.controller.js";
-import { AuthRepository } from "./auth.repositary.js";
+import { AuthRepository } from "./auth.repository.js";
 import { AuthService } from "./auth.service.js";
 import { AuthUtils } from "./auth.utils.js";
+import { requireAuth } from "../../middleware/auth.js";
 
 const router = Router();
 
@@ -31,6 +32,7 @@ router.post(
 
 router.get(
   "/me",
+  requireAuth,
   controller.me,
 );
 
