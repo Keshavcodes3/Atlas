@@ -2,9 +2,6 @@ import { MistralAI } from "@langchain/mistralai";
 
 let cached: MistralAI | null = null;
 
-// Lazy singleton so importing this module never crashes the process
-// when MISTRAL_API_KEY is unset; the error surfaces only when the
-// LLM is actually requested.
 export function getMistralLLM(): MistralAI {
   if (cached) {
     return cached;

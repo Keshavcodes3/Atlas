@@ -5,9 +5,24 @@ import {
 } from "express";
 
 import { AppError } from "../lib/errors.js";
+import {
+  AUTH_COOKIE_NAME,
+} from "../modules/auth/auth.cookies.js";
 import { AuthUtils } from "../modules/auth/auth.utils.js";
 
 const authUtils = new AuthUtils();
+
+function extractCookieToken(req: Request): string | null {
+  const cookies = req.cookies as
+    | Record<string, unknown>
+    | undefined;
+
+  const token = cookies?.[AUTH_COOKIE_NAME];
+
+  return typeof token === "string" && token.length > 0
+    ? token
+    : null;
+}
 
 function extractBearerToken(req: Request): string | null {
   const header = req.headers.authorization;
@@ -21,20 +36,22 @@ function extractBearerToken(req: Request): string | null {
   return token.length > 0 ? token : null;
 }
 
-// Verifies the JWT from `Authorization: Bearer <token>` and
-// attaches the payload as `req.user`. Use on every route that
-// requires a logged-in user (e.g. GET /v1/auth/me).
+// Verifies the JWT from the `token` httpOnly cookie
+// (fallback: `Authorization: Bearer <token>` for API clients)
+// and attaches the payload as `req.user`. Use on every route
+// that requires a logged-in user (e.g. GET /v1/auth/me).
 export function requireAuth(
   req: Request,
   _res: Response,
   next: NextFunction,
 ): void {
-  const token = extractBearerToken(req);
+  const token =
+    extractCookieToken(req) ?? extractBearerToken(req);
 
   if (!token) {
     next(
       AppError.unauthorized(
-        "Missing or malformed Authorization header",
+        "Missing auth token. Login first.",
       ),
     );
     return;

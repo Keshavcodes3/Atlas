@@ -6,6 +6,7 @@ import {
 import { ZodError } from "zod";
 
 import { AppError } from "../lib/errors.js";
+import { logger } from "../lib/logger.js";
 
 export function notFoundHandler(
   _req: Request,
@@ -67,7 +68,7 @@ export function errorHandler(
     return;
   }
 
-  console.error(err);
+  logger.error("Unhandled error", err);
 
   res.status(500).json({
     error: {

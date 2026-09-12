@@ -1,5 +1,7 @@
 import mongoose from "mongoose";
 
+import { logger } from "../logger.js";
+
 export class MongoDB {
   async connect(): Promise<void> {
     const uri = process.env.MONGODB_URI;
@@ -10,7 +12,7 @@ export class MongoDB {
 
     await mongoose.connect(uri);
 
-    console.log("MongoDB connected");
+    logger.info("MongoDB connected");
   }
 
   async disconnect(): Promise<void> {

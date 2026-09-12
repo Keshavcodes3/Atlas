@@ -36,4 +36,9 @@ router.get(
   controller.me,
 );
 
+router.post(
+  "/logout",
+  controller.logout,
+);
+
 export default router;

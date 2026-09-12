@@ -10,6 +10,10 @@ import {
 } from "./auth.schema.js";
 
 import { AuthService } from "./auth.service.js";
+import {
+  clearAuthCookie,
+  setAuthCookie,
+} from "./auth.cookies.js";
 
 export class AuthController {
   constructor(
@@ -28,6 +32,8 @@ export class AuthController {
       const result =
         await this.service.register(input);
 
+      setAuthCookie(res, result.token);
+
       return res.status(201).json(result);
     } catch (error) {
       next(error);
@@ -45,6 +51,8 @@ export class AuthController {
 
       const result =
         await this.service.login(input);
+
+      setAuthCookie(res, result.token);
 
       return res.status(200).json(result);
     } catch (error) {
@@ -72,6 +80,20 @@ export class AuthController {
         );
 
       return res.json({ user });
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  logout = async (
+    _req: Request,
+    res: Response,
+    next: NextFunction,
+  ) => {
+    try {
+      clearAuthCookie(res);
+
+      return res.json({ message: "Logged out" });
     } catch (error) {
       next(error);
     }

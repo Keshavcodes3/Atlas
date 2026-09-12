@@ -53,13 +53,8 @@ export interface WorkspaceMembership {
   role: Role;
 }
 
-declare global {
-  namespace Express {
-    interface Request {
-      membership?: WorkspaceMembership;
-    }
-  }
-}
+// NOTE: Request.membership/user/workspace augmentation lives in
+// src/types/express.d.ts (single canonical place). Don't re-declare here.
 
 export function hasPermission(
   role: Role,
